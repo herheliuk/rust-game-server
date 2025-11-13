@@ -1,0 +1,74 @@
+services:
+  rust-dedicated:
+    image: ghcr.io/herheliuk/rust-dedicated-carbon:latest
+    container_name: ${RUST_SERVER_CONTAINER_NAME}
+
+    # DO NOT SHARE THIS FILE
+
+    # Find other settings on this website:
+    # https://wiki.facepunch.com/rust/dns-records
+
+    command: >
+      +server.hostname "..."
+
+      +server.headerimage "..."
+      +server.logoimage "..."
+
+      +server.description "..."
+      +server.url "..."
+
+      +server.tags "monthly,vanilla"
+      +server.premium "false"
+
+      +server.favoritesEndpoint "..."
+
+      +server.maxplayers 200
+
+      +server.worldsize 4000
+
+      +fps.limit 120
+
+    environment:
+      SERVER_PORT: ${SERVER_PORT}
+      SERVER_QUERYPORT: ${SERVER_QUERYPORT}
+      APP_PORT: ${APP_PORT}
+
+      RCON_PORT: ${RCON_PORT}
+      RCON_PASSWORD: ${RCON_PASSWORD}
+
+    ports:
+      - ${SERVER_PORT}:${SERVER_PORT}/udp
+      - ${SERVER_QUERYPORT}:${SERVER_QUERYPORT}/udp
+      - ${APP_PORT}:${APP_PORT}
+
+    volumes:
+      - build:/home/steam/rustserver/
+      - server:/home/steam/rustserver/server/
+      - carbon:/home/steam/rustserver/carbon/
+
+    restart: unless-stopped
+
+  rust-rcon-website:
+    image: ghcr.io/herheliuk/rust-rcon-website:latest
+    container_name: ${RCON_WEBSITE_CONTAINER_NAME}
+
+    environment:
+      RCON_HOST: ${RUST_SERVER_CONTAINER_NAME}
+      
+      RCON_PORT: ${RCON_PORT}
+      RCON_PASSWORD: ${RCON_PASSWORD}
+
+      WHITE_LISTED_GOOGLE_OPEN_IDS: ${WHITE_LISTED_GOOGLE_OPEN_IDS}
+
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+    
+    ports:
+      - 127.0.0.1:${ADMIN_PANEL_PORT}:8000
+    
+    restart: unless-stopped
+
+volumes:
+  build:
+  server:
+  carbon:

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rust RCON Web Console</title>
+<style>
+html,body{height:100%;margin:0;padding:0;font-family:monospace;background:#1e1e1e;color:#eaeaea;font-size:1rem}
+body{display:flex;flex-direction:column;overflow:hidden}
+#console{flex:1;display:flex;flex-direction:column;overflow:auto;background:#000;padding:.6rem;box-sizing:border-box;border-bottom:.15rem solid #333;white-space:pre;position:relative}
+#console-content{display:flex;flex-direction:column;margin-top:auto}
+#scroll-bottom{position:fixed;right:1rem;bottom:1rem;background:rgba(50,50,50,.9);color:#fff;border:.08rem solid #666;border-radius:.3rem;width:2.4rem;height:2.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .18s ease, transform .18s ease, background .2s;z-index:1000}
+#scroll-bottom.visible{opacity:1;pointer-events:all}
+#scroll-bottom:hover{background:#444}
+.console-line{background:#111;color:#ddd;padding:.6rem .8rem;border:.08rem solid #333;border-radius:.4rem;margin:.4rem 0;font-size:1rem;line-height:1.4;word-break:normal;overflow-x:auto;white-space:pre}
+#input-area{display:flex;flex-wrap:wrap;padding:.6rem;background:#111;gap:.6rem;overflow-x:auto;box-sizing:border-box}
+#command{flex:1 1 100%;padding:.8rem;background:#222;color:#fff;border:.08rem solid #333;border-radius:.3rem;outline:none;font-size:1rem;min-width:0}
+#command:disabled{opacity:.5;cursor:not-allowed}
+#button-container { position: absolute; top: .8rem; right: .8rem; display: flex; gap: .5rem; z-index: 1200; }
+#button-container button { padding: .5rem .9rem; border: none; border-radius: .3rem; cursor: pointer; font-size: .9rem; transition: background .2s, transform .2s; user-select: none; touch-action: manipulation; }
+#logout { background: #a33; color: #fff; }
+#logout:hover { background: #922; }
+#clear { background: #555; color: #fff; }
+#clear:hover { background: #666; }
+#reconnect { display: none; background: #e1c000; color: #000; }
+#reconnect:hover { background: #d1b000; }
+pre.json{white-space:pre;overflow-x:auto;background:#111;padding:.4rem;border:.08rem solid #333;border-radius:.3rem;margin:.3rem 0}
+.json-key{color:#6cf}
+.json-string{color:#afa}
+.json-number{color:#fc6}
+.json-boolean{color:#f99}
+.json-null{color:#f55}
+@media (max-width: 768px) {
+    html, body { font-size: 1rem; }
+    #command { font-size: 1rem; padding: .7rem; }
+    .console-line { font-size: 1rem; padding: .5rem .6rem; }
+    #logout { font-size: .9rem; padding: .45rem .7rem; }
+    #clear { font-size: .9rem; padding: .45rem .7rem; right: 5.5rem; }
+    #reconnect {font-size: .9rem;padding: .45rem .7rem;right: 11rem;}
+    #scroll-bottom { width: 2.2rem; height: 2.2rem; font-size: 1.1rem; }
+    #button-container button { font-size: .9rem; padding: .45rem .7rem; }
+}
+@media (max-width: 480px) {
+    html, body { font-size: 1rem; }
+    #command { font-size: 1rem; padding: .6rem; margin: .5rem 1rem 1.75rem 1rem; }
+    #command:focus { margin: 0; }
+    .console-line { font-size: 1rem; padding: .5rem .6rem; }
+    #logout { font-size: .85rem; padding: .4rem .6rem; }
+    #clear { font-size: .85rem; padding: .4rem .6rem; right: 5.1rem; }
+    #reconnect {font-size: .85rem;padding: .4rem .6rem;right: 10.5rem;}
+    #scroll-bottom { width: 2rem; height: 2rem; font-size: 1rem; }
+    #button-container button { font-size: .85rem; padding: .4rem .6rem; }
+}
+</style>
+</head>
+<body>
+<div id="button-container">
+    <button id="reconnect" onclick="reconnect()">Reconnect</button>
+    <button id="clear" onclick="clearConsole()">Clear</button>
+    <button id="logout" onclick="logout()">Logout</button>
+</div>
+
+<div id="console"><div id="console-content"></div></div>
+<div id="scroll-bottom">↓</div>
+<div id="input-area">
+    <input type="text" id="command" placeholder="Type a Rust RCON command...">
+</div>
+
+<script>
+const consoleContainer = document.getElementById("console");
+const consoleContent = document.getElementById("console-content");
+const commandInput = document.getElementById("command");
+const scrollBtn = document.getElementById("scroll-bottom");
+const inputArea = document.getElementById("input-area");
+const reconnectBtn = document.getElementById("reconnect");
+
+let history = [];
+let historyIndex = -1;
+let pendingInput = "";
+let ws;
+let reconnectInterval;
+
+try {
+    const saved = JSON.parse(localStorage.getItem("rconCommandHistory") || "[]");
+    if (Array.isArray(saved)) {
+        history = saved;
+        historyIndex = history.length;
+    }
+} catch (err) {
+    console.warn("Failed to load command history:", err);
+}
+
+function syntaxHighlight(json) {
+    json = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return json.replace(
+        /("(\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+        match => {
+            let cls = "json-number";
+            if (/^"/.test(match)) cls = /:$/.test(match) ? "json-key" : "json-string";
+            else if (/true|false/.test(match)) cls = "json-boolean";
+            else if (/null/.test(match)) cls = "json-null";
+            return `<span class="${cls}">${match}</span>`;
+        }
+    );
+}
+
+function updateScrollBtnPosition() {
+    const rect = consoleContainer.getBoundingClientRect();
+    const offset = Math.max(0, window.innerHeight - rect.bottom) + 12;
+    scrollBtn.style.bottom = offset + "px";
+}
+
+function logMessage(message, type = "info") {
+    const trimmed = message.trim();
+    const el = document.createElement("pre");
+    el.className = "console-line";
+
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed) && parsed.every(e => typeof e === "object" && "Message" in e)) {
+                el.textContent = parsed.map(e => e.Message).join("\n");
+            } else {
+                el.innerHTML = syntaxHighlight(JSON.stringify(parsed, null, 2));
+            }
+        } catch {
+            el.textContent = trimmed;
+        }
+    } else {
+        el.textContent = trimmed;
+    }
+
+    if (type === "error") el.style.color = "#f55";
+    if (type === "sent") el.style.color = "#5f5";
+
+    const nearBottom = consoleContainer.scrollHeight - consoleContainer.scrollTop - consoleContainer.clientHeight < 50;
+    consoleContent.appendChild(el);
+
+    requestAnimationFrame(() => {
+        updateScrollBtnPosition();
+        if (nearBottom) {
+            consoleContainer.scrollTop = consoleContainer.scrollHeight;
+            scrollBtn.classList.remove("visible");
+        } else {
+            scrollBtn.classList.add("visible");
+        }
+    });
+}
+
+scrollBtn.addEventListener("click", () => {
+    consoleContainer.scrollTo({ top: consoleContainer.scrollHeight, behavior: "smooth" });
+    scrollBtn.classList.remove("visible");
+});
+
+consoleContainer.addEventListener("scroll", () => {
+    const nearBottom = consoleContainer.scrollHeight - consoleContainer.scrollTop - consoleContainer.clientHeight < 50;
+    scrollBtn.classList.toggle("visible", !nearBottom);
+    updateScrollBtnPosition();
+});
+
+window.addEventListener("resize", updateScrollBtnPosition);
+const resizeObserver = new ResizeObserver(updateScrollBtnPosition);
+resizeObserver.observe(inputArea);
+resizeObserver.observe(consoleContainer);
+
+function connectWebSocket() {
+    ws = new WebSocket(`wss://${window.location.host}/`);
+
+    ws.onmessage = e => logMessage(e.data, "info");
+
+    ws.onopen = () => {
+        logMessage("[Connected to RCON]", "sent");
+        commandInput.disabled = false;
+        commandInput.placeholder = "Type a Rust RCON command...";
+        reconnectBtn.style.display = "none";
+
+        if (reconnectInterval) {
+            clearInterval(reconnectInterval);
+            reconnectInterval = null;
+        }
+    };
+
+    ws.onclose = () => {
+        if (!reconnectInterval) {
+            logMessage("[Disconnected]", "error");
+            commandInput.disabled = true;
+            commandInput.placeholder = "Disconnected from RCON";
+            reconnectBtn.style.display = "inline-block";
+        }
+    };
+
+    ws.onerror = () => {
+        if (!reconnectInterval) {
+            logMessage("[WebSocket Error]", "error");
+            commandInput.disabled = true;
+            commandInput.placeholder = "Connection error";
+            reconnectBtn.style.display = "inline-block";
+        }
+    };
+}
+
+connectWebSocket();
+
+function reconnect() {
+    reconnectBtn.style.display = "none";
+    logMessage("[Attempting to reconnect...]", "info");
+
+    connectWebSocket();
+
+    if (!reconnectInterval) {
+        reconnectInterval = setInterval(() => {
+            if (!ws || ws.readyState === WebSocket.CLOSED) {
+                logMessage("[Retrying connection...]", "info");
+                connectWebSocket();
+            }
+        }, 5000);
+    }
+}
+
+function sendCommand() {
+    const cmd = commandInput.value.trim();
+    if (!cmd) return;
+
+    ws.send(JSON.stringify({ Message: cmd }));
+    logMessage("> " + cmd, "sent");
+
+    if (history[history.length - 1] !== cmd) history.push(cmd);
+    historyIndex = history.length;
+    localStorage.setItem("rconCommandHistory", JSON.stringify(history.slice(-200)));
+    commandInput.value = "";
+}
+
+commandInput.addEventListener("keydown", e => {
+    if (e.key === "Enter") sendCommand();
+    else if (e.key === "ArrowUp") {
+        if (historyIndex > 0) {
+            historyIndex--;
+            commandInput.value = history[historyIndex];
+            setTimeout(() => commandInput.setSelectionRange(commandInput.value.length, commandInput.value.length), 0);
+        }
+        e.preventDefault();
+    } else if (e.key === "ArrowDown") {
+        if (historyIndex < history.length - 1) {
+            historyIndex++;
+            commandInput.value = history[historyIndex];
+        } else {
+            historyIndex = history.length;
+            commandInput.value = "";
+        }
+        e.preventDefault();
+    }
+});
+
+document.addEventListener("keydown", (e) => {
+    if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Tab"].includes(e.key)) return;
+    if (document.activeElement !== commandInput) commandInput.focus();
+});
+
+let touchStartX = 0, touchStartY = 0, touchEndX = 0, touchEndY = 0, touchStartTime = 0, isSwiping = false, historyBrowsing = false;
+const minSwipeDistance = 30, maxTapDistance = 10, maxTapTime = 200;
+
+commandInput.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+    touchStartTime = Date.now();
+    isSwiping = false;
+    if (!historyBrowsing) pendingInput = commandInput.value;
+    if (document.activeElement === commandInput) e.preventDefault();
+}, { passive: false });
+
+commandInput.addEventListener("touchmove", (e) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    touchEndX = touch.clientX;
+    touchEndY = touch.clientY;
+    const deltaX = touchStartX - touchEndX;
+    const deltaY = touchStartY - touchEndY;
+    if (!isSwiping && Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > minSwipeDistance) {
+        isSwiping = true;
+        historyBrowsing = true;
+    }
+    if (isSwiping) e.preventDefault();
+});
+
+commandInput.addEventListener("touchend", () => {
+    const deltaY = touchStartY - touchEndY;
+    const touchDuration = Date.now() - touchStartTime;
+
+    if (Math.abs(touchStartX - touchEndX) < maxTapDistance && Math.abs(deltaY) < maxTapDistance && touchDuration < maxTapTime) {
+        commandInput.focus();
+    }
+
+    if (!isSwiping) return;
+
+    if (deltaY > 0) {
+        if (historyIndex > 0) {
+            historyIndex--;
+            commandInput.value = history[historyIndex];
+        }
+    } else {
+        if (historyIndex < history.length - 1) {
+            historyIndex++;
+            commandInput.value = history[historyIndex];
+        } else {
+            historyIndex = history.length;
+            commandInput.value = pendingInput;
+            historyBrowsing = false;
+        }
+    }
+
+    touchStartX = touchStartY = touchEndX = touchEndY = 0;
+    isSwiping = false;
+});
+
+commandInput.addEventListener("input", () => {
+    if (!historyBrowsing) pendingInput = commandInput.value;
+});
+
+async function logout() {
+    await fetch("/logout", { method: "POST" });
+    window.location.href = "/login";
+}
+
+function clearConsole() {
+    consoleContent.innerHTML = "";
+    updateScrollBtnPosition();
+}
+
+updateScrollBtnPosition();
+</script>
+</body>
+</html>
